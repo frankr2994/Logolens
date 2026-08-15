@@ -37,6 +37,13 @@ export interface LogEvent {
   raw: unknown;
 }
 
+export interface TraceIndexes {
+  spanById: Map<string, Span>;
+  childrenByParentId: Map<string | undefined, Span[]>;
+  logsBySpanId: Map<string | undefined, LogEvent[]>;
+  errorSpanIds: Set<string>;
+}
+
 export interface Trace {
   traceId: string;
   spans: Span[];
@@ -44,4 +51,5 @@ export interface Trace {
   startTime: number;
   endTime: number;
   durationMs: number;
+  indexes?: TraceIndexes;
 }

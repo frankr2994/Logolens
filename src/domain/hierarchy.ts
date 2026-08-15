@@ -1,15 +1,15 @@
-import { Span } from './model';
+import { Span, Trace } from './model';
 
 export interface SpanNode {
   span: Span;
   children: SpanNode[];
 }
 
-export function buildHierarchy(spans: Span[]): { roots: SpanNode[], orphans: SpanNode[], issues: string[] } {
+export function buildHierarchy(trace: Trace): { roots: SpanNode[], orphans: SpanNode[], issues: string[] } {
   const issues: string[] = [];
   const map = new Map<string, SpanNode>();
 
-  for (const span of spans) {
+  for (const span of trace.spans) {
     if (map.has(span.spanId)) {
       issues.push(`Duplicate span ID: ${span.spanId}`);
       continue;
@@ -84,7 +84,6 @@ export function buildHierarchy(spans: Span[]): { roots: SpanNode[], orphans: Spa
       dfs(nodeId);
     }
   }
-
 
   // Sort siblings by start time, duration, span ID
   function sortNodes(nodes: SpanNode[]) {

@@ -1,4 +1,4 @@
-import { Span, LogEvent } from './model';
+import { Span, LogEvent, Trace } from './model';
 
 export interface FilterState {
   services: string[];
@@ -8,7 +8,7 @@ export interface FilterState {
   searchQuery: string;
 }
 
-function matchesSearch(span: Span, query: string, logs: LogEvent[]): boolean {
+function matchesSearch(span: Span, query: string, spanLogs: LogEvent[]): boolean {
   if (!query) return true;
   const q = query.toLowerCase();
   if (span.name.toLowerCase().includes(q)) return true;
@@ -18,7 +18,6 @@ function matchesSearch(span: Span, query: string, logs: LogEvent[]): boolean {
     if (String(v).toLowerCase().includes(q)) return true;
   }
   
-  const spanLogs = logs.filter(l => l.spanId === span.spanId);
   for (const log of spanLogs) {
     if (log.message.toLowerCase().includes(q)) return true;
     if (log.stackTrace?.toLowerCase().includes(q)) return true;
@@ -36,10 +35,10 @@ function getHttpStatusCode(span: Span): string | null {
   return status ? String(status) : null;
 }
 
-export function filterSpans(spans: Span[], logs: LogEvent[], filters: FilterState): Set<string> {
+export function filterSpans(trace: Trace, filters: FilterState): Set<string> {
   const matchedSpanIds = new Set<string>();
   
-  for (const span of spans) {
+  for (const span of trace.spans) {
     let match = true;
     
     if (filters.services.length > 0 && !filters.services.includes(span.serviceName)) {
@@ -53,8 +52,9 @@ export function filterSpans(spans: Span[], logs: LogEvent[], filters: FilterStat
       }
     }
     
+    const spanLogs = trace.indexes?.logsBySpanId.get(span.spanId) || trace.logs.filter(l => l.spanId === span.spanId);
+
     if (match && filters.severities.length > 0) {
-      const spanLogs = logs.filter(l => l.spanId === span.spanId);
       const hasMatchingLog = spanLogs.some(l => filters.severities.includes(l.severity));
       if (!hasMatchingLog) {
         match = false;
@@ -65,7 +65,7 @@ export function filterSpans(spans: Span[], logs: LogEvent[], filters: FilterStat
       match = false;
     }
     
-    if (match && !matchesSearch(span, filters.searchQuery, logs)) {
+    if (match && !matchesSearch(span, filters.searchQuery, spanLogs)) {
       match = false;
     }
     
@@ -77,17 +77,16 @@ export function filterSpans(spans: Span[], logs: LogEvent[], filters: FilterStat
   return matchedSpanIds;
 }
 
-export function getRetainedSpanIds(spans: Span[], matchedSpanIds: Set<string>): Set<string> {
+export function getRetainedSpanIds(trace: Trace, matchedSpanIds: Set<string>): Set<string> {
   const retained = new Set<string>();
-  const map = new Map<string, Span>();
-  for (const s of spans) map.set(s.spanId, s);
   
   for (const spanId of matchedSpanIds) {
     let curr: string | undefined = spanId;
     while (curr) {
       if (retained.has(curr)) break;
       retained.add(curr);
-      curr = map.get(curr)?.parentSpanId;
+      const currSpan: Span | undefined = trace.indexes?.spanById.get(curr) || trace.spans.find(s => s.spanId === curr);
+      curr = currSpan?.parentSpanId;
     }
   }
   
