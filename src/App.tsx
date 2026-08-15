@@ -5,6 +5,10 @@ import { buildHierarchy } from './domain/hierarchy';
 import { parseJson, parseNdjson, Dataset } from './domain/ingestion';
 import { checkoutSample } from './domain/samples/checkout';
 import { Waterfall } from './components/Waterfall';
+import { FlameGraph } from './components/FlameGraph';
+import { ServiceGraph } from './components/ServiceGraph';
+import { TraceDiff } from './components/TraceDiff';
+import { LogStream } from './components/LogStream';
 
 export default function App() {
   const [dataset, setDataset] = useState<Dataset>({ traces: [] });
@@ -15,6 +19,7 @@ export default function App() {
   });
   const [selectedSpanId, setSelectedSpanId] = useState<string | undefined>();
   const [expandedState, setExpandedState] = useState<Record<string, boolean>>({});
+  const [importSummary, setImportSummary] = useState<{ acceptedSpans: number, acceptedLogs: number, issues: string[] } | null>(null);
   
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -27,26 +32,47 @@ export default function App() {
         res = resNd;
       }
     }
+    
+    let acceptedSpans = 0;
+    let acceptedLogs = 0;
+    res.dataset.traces.forEach(t => {
+      acceptedSpans += t.spans.length;
+      acceptedLogs += t.logs.length;
+    });
+
+    setImportSummary({ acceptedSpans, acceptedLogs, issues: res.issues });
+
     setDataset(res.dataset);
     if (res.dataset.traces.length > 0) {
       setSelectedTraceId(res.dataset.traces[0].traceId);
+    } else {
+      setSelectedTraceId('');
     }
+    setSelectedSpanId(undefined);
+    setExpandedState({});
+    setFilters({ services: [], httpStatusCodes: [], severities: [], minDurationMs: null, searchQuery: '' });
   };
   
   const loadSample = () => {
     setDataset(checkoutSample);
-    if (checkoutSample.traces.length > 0) setSelectedTraceId(checkoutSample.traces[0].traceId);
+    setImportSummary(null);
+    if (checkoutSample.traces.length > 0) {
+      setSelectedTraceId(checkoutSample.traces[0].traceId);
+      setSelectedSpanId(undefined);
+      setExpandedState({});
+      setFilters({ services: [], httpStatusCodes: [], severities: [], minDurationMs: null, searchQuery: '' });
+    }
   };
   
   const trace = useMemo(() => dataset.traces.find(t => t.traceId === selectedTraceId) || dataset.traces[0], [dataset, selectedTraceId]);
   
-  const { roots, orphans } = useMemo(() => trace ? buildHierarchy(trace.spans) : { roots: [], orphans: [], issues: [] }, [trace]);
-  const metrics = useMemo(() => trace ? calculateMetrics(trace.spans, trace.logs) : { totalTraceTimeMs: 0, spanCount: 0, errorRate: 0, bottleneckSpan: null }, [trace]);
+  const { roots, orphans, issues: hierarchyIssues } = useMemo(() => trace ? buildHierarchy(trace) : { roots: [], orphans: [], issues: [] }, [trace]);
+  const metrics = useMemo(() => trace ? calculateMetrics(trace) : { totalTraceTimeMs: 0, spanCount: 0, errorRate: 0, bottleneckSpan: null }, [trace]);
   
   const retainedSpanIds = useMemo(() => {
     if (!trace) return new Set<string>();
-    const matched = filterSpans(trace.spans, trace.logs, filters);
-    return getRetainedSpanIds(trace.spans, matched);
+    const matched = filterSpans(trace, filters);
+    return getRetainedSpanIds(trace, matched);
   }, [trace, filters]);
   
   const selectedSpan = useMemo(() => trace?.spans.find(s => s.spanId === selectedSpanId), [trace, selectedSpanId]);
@@ -57,7 +83,7 @@ export default function App() {
   
   const jumpToError = () => {
     if (!trace) return;
-    const errSpan = trace.spans.find(s => s.status.code === 'ERROR' || (s.attributes['http.response.status_code'] as number) >= 500);
+    const errSpan = trace.spans.find(s => s.status.code === 'ERROR' || (s.attributes['http.response.status_code'] as number) >= 500 || (s.attributes['http.status_code'] as number) >= 500);
     if (errSpan) {
       let curr = errSpan.parentSpanId;
       const newExpanded = { ...expandedState };
@@ -68,12 +94,20 @@ export default function App() {
       }
       setExpandedState(newExpanded);
       setSelectedSpanId(errSpan.spanId);
-      // Ensure we clear filters to see it
       setFilters({ services: [], httpStatusCodes: [], severities: [], minDurationMs: null, searchQuery: '' });
     }
   };
 
+  const [viewMode, setViewMode] = useState<'waterfall' | 'flame' | 'topology' | 'compare'>('waterfall');
+  const [compareTraceId, setCompareTraceId] = useState<string>('');
+
+  const updateFilters = (newFilters: FilterState) => {
+    setFilters(newFilters);
+    setExpandedState({});
+  };
+
   const allServices = Array.from(new Set(trace?.spans.map(s => s.serviceName) || []));
+  const compareTrace = useMemo(() => dataset.traces.find(t => t.traceId === compareTraceId), [dataset, compareTraceId]);
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100vh', width: '100%', overflow: 'hidden' }}>
@@ -84,40 +118,61 @@ export default function App() {
             <input type="file" onChange={handleFileUpload} />
             <button onClick={loadSample}>Load Sample</button>
             {dataset.traces.length > 1 && (
-              <select value={selectedTraceId} onChange={e => setSelectedTraceId(e.target.value)}>
+              <select value={selectedTraceId} onChange={e => {
+                setSelectedTraceId(e.target.value);
+                setSelectedSpanId(undefined);
+              }}>
                 {dataset.traces.map(t => (
                   <option key={t.traceId} value={t.traceId}>{t.traceId} ({t.spans.length} spans)</option>
                 ))}
               </select>
             )}
             <button onClick={jumpToError} style={{ color: '#ff6b6b' }}>Jump to Error</button>
+            
+            <div style={{ display: 'flex', border: '1px solid #444', borderRadius: 4, overflow: 'hidden' }}>
+              {(['waterfall', 'flame', 'topology', 'compare'] as const).map(mode => (
+                <button 
+                  key={mode} 
+                  onClick={() => setViewMode(mode)}
+                  style={{
+                    padding: '6px 12px',
+                    border: 'none',
+                    backgroundColor: viewMode === mode ? '#3a3a4a' : 'transparent',
+                    color: viewMode === mode ? '#fff' : '#aaa',
+                    cursor: 'pointer'
+                  }}
+                >
+                  {mode.charAt(0).toUpperCase() + mode.slice(1)}
+                </button>
+              ))}
+            </div>
           </div>
         </div>
         
         <div style={{ display: 'flex', gap: 16, marginTop: 16, flexWrap: 'wrap', alignItems: 'center' }}>
-          <input type="text" placeholder="Search..." value={filters.searchQuery} onChange={e => setFilters({...filters, searchQuery: e.target.value})} style={{ padding: 4 }} />
+          <input type="text" placeholder="Search..." value={filters.searchQuery} onChange={e => updateFilters({...filters, searchQuery: e.target.value})} style={{ padding: 4 }} />
           
-          <select onChange={e => {
+          <select value={filters.services} onChange={e => {
             const opts = Array.from(e.target.selectedOptions, option => option.value);
-            setFilters({...filters, services: opts.includes('') ? [] : opts});
+            updateFilters({...filters, services: opts.includes('') ? [] : opts});
           }} multiple style={{ height: 40 }}>
             <option value="">All Services</option>
             {allServices.map(s => <option key={s} value={s}>{s}</option>)}
           </select>
 
-          <select onChange={e => {
+          <select value={filters.httpStatusCodes} onChange={e => {
             const opts = Array.from(e.target.selectedOptions, option => option.value);
-            setFilters({...filters, httpStatusCodes: opts.includes('') ? [] : opts});
+            updateFilters({...filters, httpStatusCodes: opts.includes('') ? [] : opts});
           }} multiple style={{ height: 40 }}>
             <option value="">All HTTP Statuses</option>
             {Array.from(new Set(trace?.spans.map(s => String(s.attributes['http.response.status_code'] ?? s.attributes['http.status_code'] ?? '')).filter(Boolean))).map(s => <option key={s} value={s}>{s}</option>)}
           </select>
 
-          <input type="number" placeholder="Min latency ms" value={filters.minDurationMs || ''} onChange={e => setFilters({...filters, minDurationMs: e.target.value ? Number(e.target.value) : null})} style={{ width: 120, padding: 4 }} />
+          <input type="number" placeholder="Min latency ms" value={filters.minDurationMs || ''} onChange={e => updateFilters({...filters, minDurationMs: e.target.value ? Number(e.target.value) : null})} style={{ width: 120, padding: 4 }} />
           
-          <select onChange={e => {
+          <select value={filters.severities} onChange={e => {
             const opts = Array.from(e.target.selectedOptions, option => option.value);
-            setFilters({...filters, severities: opts.includes('') ? [] : opts});
+            updateFilters({...filters, severities: opts.includes('') ? [] : opts});
           }} multiple style={{ height: 40 }}>
             <option value="">All Severities</option>
             <option value="ERROR">ERROR</option>
@@ -127,6 +182,27 @@ export default function App() {
           </select>
         </div>
         
+        {importSummary && (
+          <div style={{ marginTop: 16, padding: 8, backgroundColor: '#2a2a3a', borderRadius: 4, fontSize: '0.85rem' }}>
+            <div><strong>Import Summary:</strong> Accepted {importSummary.acceptedSpans} spans, {importSummary.acceptedLogs} logs.</div>
+            {importSummary.issues.length > 0 && (
+              <div style={{ color: '#feca57', marginTop: 4 }}>
+                <strong>Warnings:</strong>
+                <ul style={{ margin: 0, paddingLeft: 20 }}>
+                  {importSummary.issues.slice(0, 5).map((i, idx) => <li key={idx}>{i}</li>)}
+                  {importSummary.issues.length > 5 && <li>...and {importSummary.issues.length - 5} more issues</li>}
+                </ul>
+              </div>
+            )}
+          </div>
+        )}
+
+        {hierarchyIssues && hierarchyIssues.length > 0 && (
+          <div style={{ marginTop: 8, padding: 8, backgroundColor: '#3a2a2a', borderRadius: 4, fontSize: '0.85rem', color: '#ff6b6b' }}>
+            <strong>Hierarchy Issues:</strong> {hierarchyIssues.join(', ')}
+          </div>
+        )}
+
         {trace && (
           <div style={{ display: 'flex', gap: 16, marginTop: 16, fontSize: '0.9rem' }}>
             <div>Trace Time: {metrics.totalTraceTimeMs.toFixed(2)}ms</div>
@@ -138,19 +214,51 @@ export default function App() {
       </header>
       
       <main style={{ display: 'flex', flex: 1, overflow: 'hidden' }}>
-        <div style={{ flex: 1, overflow: 'auto', padding: 16 }}>
-          {trace && (roots.length > 0 || orphans.length > 0) ? (
-            <Waterfall 
-              nodes={[...roots, ...orphans]}
-              totalTraceTimeMs={metrics.totalTraceTimeMs}
-              traceStartMs={trace.startTime}
-              selectedSpanId={selectedSpanId}
-              onSelect={setSelectedSpanId}
-              retainedSpanIds={retainedSpanIds}
-              expandedState={expandedState}
-              onToggleExpand={toggleExpand}
-            />
-          ) : <div>No trace data</div>}
+        <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+          <div style={{ flex: 1, overflow: 'auto', padding: 16 }}>
+            {viewMode === 'waterfall' && trace && (roots.length > 0 || orphans.length > 0) ? (
+              <Waterfall 
+                nodes={[...roots, ...orphans]}
+                totalTraceTimeMs={metrics.totalTraceTimeMs}
+                traceStartMs={trace.startTime}
+                selectedSpanId={selectedSpanId}
+                onSelect={setSelectedSpanId}
+                retainedSpanIds={retainedSpanIds}
+                expandedState={expandedState}
+                onToggleExpand={toggleExpand}
+              />
+            ) : viewMode === 'flame' && trace ? (
+              <FlameGraph 
+                nodes={[...roots, ...orphans]}
+                totalTraceTimeMs={metrics.totalTraceTimeMs}
+                traceStartMs={trace.startTime}
+                selectedSpanId={selectedSpanId}
+                onSelect={setSelectedSpanId}
+                retainedSpanIds={retainedSpanIds}
+              />
+            ) : viewMode === 'topology' && trace ? (
+              <ServiceGraph trace={trace} />
+            ) : viewMode === 'compare' ? (
+              <div style={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
+                <div style={{ padding: 16, backgroundColor: '#2a2a3a' }}>
+                  Select trace to compare against: 
+                  <select value={compareTraceId} onChange={e => setCompareTraceId(e.target.value)} style={{ marginLeft: 8 }}>
+                    <option value="">-- Select Trace --</option>
+                    {dataset.traces.map(t => <option key={t.traceId} value={t.traceId}>{t.traceId}</option>)}
+                  </select>
+                </div>
+                {trace && compareTrace ? (
+                  <TraceDiff traceA={trace} traceB={compareTrace} />
+                ) : (
+                  <div style={{ padding: 16 }}>Please select a trace to compare.</div>
+                )}
+              </div>
+            ) : <div>No trace data</div>}
+          </div>
+          
+          <div style={{ height: '30%', minHeight: 150, borderTop: '2px solid #333' }}>
+            {trace && <LogStream logs={trace.logs} trace={trace} selectedSpanId={selectedSpanId} />}
+          </div>
         </div>
         
         {selectedSpan && (
@@ -161,32 +269,9 @@ export default function App() {
             </div>
             
             <h4>Span Details</h4>
-            <pre style={{ fontSize: '0.8rem', whiteSpace: 'pre-wrap' }}>
+            <pre style={{ fontSize: '0.8rem', whiteSpace: 'pre-wrap', color: '#ccc' }}>
               {JSON.stringify(selectedSpan, null, 2)}
             </pre>
-
-            <h4>Associated Logs</h4>
-            {(() => {
-              const spanLogs = trace?.logs.filter(l => l.spanId === selectedSpan.spanId) || [];
-              if (spanLogs.length === 0) return <div style={{ fontSize: '0.8rem', color: '#888' }}>No logs associated with this span.</div>;
-              return spanLogs.map(log => (
-                <div key={log.id} style={{ marginBottom: 16, backgroundColor: '#2a2a3a', padding: 8, borderRadius: 4 }}>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.8rem' }}>
-                    <span style={{ color: log.severity === 'ERROR' ? '#ff6b6b' : log.severity === 'WARN' ? '#feca57' : '#48dbfb' }}>{log.severity}</span>
-                    <span style={{ color: '#888' }}>{log.timestamp.toFixed(2)}ms</span>
-                  </div>
-                  <div style={{ fontSize: '0.9rem', marginTop: 4 }}>{log.message}</div>
-                  {log.stackTrace && (
-                    <pre style={{ fontSize: '0.75rem', color: '#ff9f43', marginTop: 8, overflowX: 'auto', whiteSpace: 'pre-wrap' }}>
-                      {log.stackTrace}
-                    </pre>
-                  )}
-                  <pre style={{ fontSize: '0.75rem', marginTop: 8, color: '#aaa', whiteSpace: 'pre-wrap' }}>
-                    {JSON.stringify(log.attributes, null, 2)}
-                  </pre>
-                </div>
-              ));
-            })()}
           </div>
         )}
       </main>

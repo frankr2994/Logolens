@@ -45,7 +45,19 @@ export function Waterfall({ nodes, totalTraceTimeMs, traceStartMs, depth = 0, se
   );
 }
 
-function WaterfallRow({ node, totalTraceTimeMs, traceStartMs, depth, selectedSpanId, onSelect, retainedSpanIds, expandedState, onToggleExpand }: any) {
+interface WaterfallRowProps {
+  node: SpanNode;
+  totalTraceTimeMs: number;
+  traceStartMs: number;
+  depth: number;
+  selectedSpanId?: string;
+  onSelect: (spanId: string) => void;
+  retainedSpanIds: Set<string>;
+  expandedState: Record<string, boolean>;
+  onToggleExpand: (spanId: string) => void;
+}
+
+function WaterfallRow({ node, totalTraceTimeMs, traceStartMs, depth, selectedSpanId, onSelect, retainedSpanIds, expandedState, onToggleExpand }: WaterfallRowProps) {
   if (!retainedSpanIds.has(node.span.spanId)) return null;
 
   const expanded = expandedState[node.span.spanId] !== false;
@@ -53,7 +65,7 @@ function WaterfallRow({ node, totalTraceTimeMs, traceStartMs, depth, selectedSpa
   const leftPercent = totalTraceTimeMs > 0 ? ((node.span.startTime - traceStartMs) / totalTraceTimeMs) * 100 : 0;
   const widthPercent = totalTraceTimeMs > 0 ? (node.span.durationMs / totalTraceTimeMs) * 100 : 100;
   
-  const isError = node.span.status.code === 'ERROR' || node.span.attributes['http.response.status_code'] >= 500;
+  const isError = node.span.status.code === 'ERROR' || (node.span.attributes['http.response.status_code'] as number) >= 500 || (node.span.attributes['http.status_code'] as number) >= 500;
   const isSelected = selectedSpanId === node.span.spanId;
 
   return (
