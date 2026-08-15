@@ -21,3 +21,6 @@
 /dist/
 /build/
 # END ANTIGRAVITY ORCHESTRA
+
+.idea/
+*.tsbuildinfo
